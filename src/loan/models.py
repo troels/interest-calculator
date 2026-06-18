@@ -99,3 +99,20 @@ class SwapContract:
     def remaining_years(self, as_of: date) -> float:
         """Whole-ish years from ``as_of`` to maturity (actual/365.25)."""
         return max(0.0, (self.maturity - as_of).days / 365.25)
+
+
+@dataclass(frozen=True)
+class RealkreditLoan:
+    """A realkredit loan to compare against the swap.
+
+    Modelled bullet (interest-only) to match the swap's structure. ``product``
+    selects the rate model: ``fixed_callable`` reads the DST realkredit yield;
+    ``flex`` reads the swap-curve par rate at ``flex_tenor_years`` (e.g. 5 = F5,
+    1 = F1/short). ``bidrag_pct`` is the admin margin added on top.
+    """
+
+    notional: float = 22_500_000.0
+    product: str = "fixed_callable"      # fixed_callable | flex
+    bidrag_pct: float = 0.60             # bidragssats (admin margin) p.a., percent
+    flex_tenor_years: float = 5.0        # reset tenor for flex products
+
