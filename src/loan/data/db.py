@@ -59,6 +59,14 @@ CREATE TABLE IF NOT EXISTS realkredit_fetch_log (
     raw        TEXT,
     fetched_at TEXT
 );
+-- Monthly (or daily) aggregate rate series, e.g. DST MPK3 realkredit yield.
+CREATE TABLE IF NOT EXISTS rate_series (
+    series TEXT NOT NULL,              -- e.g. 'rk_fixed_yield'
+    period TEXT NOT NULL,              -- 'YYYY-MM' (monthly) or ISO date
+    value  REAL NOT NULL,             -- percent p.a.
+    source TEXT NOT NULL,             -- e.g. 'dst:MPK3:5500701001'
+    PRIMARY KEY (series, period)
+);
 """
 
 
@@ -191,6 +199,35 @@ class CurveDB:
             maturity=_date.fromisoformat(r["maturity"]) if r["maturity"] else None,
             price=r["price"], yield_pct=r["yield_pct"], source=r["source"],
         )
+
+    # --------------------------------------------------------- rate series
+    def put_rate_series(self, series: str, source: str,
+                        points: list[tuple[str, float]]) -> int:
+        with self.conn:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO rate_series (series, period, value, source) "
+                "VALUES (?, ?, ?, ?)",
+                [(series, period, value, source) for period, value in points],
+            )
+        return len(points)
+
+    def get_rate_series(self, series: str) -> list[tuple[str, float]]:
+        cur = self.conn.execute(
+            "SELECT period, value FROM rate_series WHERE series = ? ORDER BY period",
+            (series,),
+        )
+        return [(r["period"], r["value"]) for r in cur.fetchall()]
+
+    def rate_on(self, series: str, d: _date) -> float | None:
+        """Latest value at or before month ``d`` (monthly series, 'YYYY-MM')."""
+        period = f"{d.year:04d}-{d.month:02d}"
+        cur = self.conn.execute(
+            "SELECT value FROM rate_series WHERE series = ? AND period <= ? "
+            "ORDER BY period DESC LIMIT 1",
+            (series, period),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
 
     def stats(self) -> dict:
         ok = self.conn.execute(

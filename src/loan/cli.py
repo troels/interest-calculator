@@ -14,6 +14,7 @@ import typer
 from .config import load_env
 from .data.cache import Cache
 from .data import dfbf
+from .data import dst
 from .data.backfill import backfill_curves
 from .data.db import CurveDB
 from .data.loaders import parse_curve_txt, parse_dmy
@@ -90,6 +91,18 @@ def backfill_curves_cmd(
     typer.echo(f"run: {result}")
     typer.echo(f"db totals: ok={s['ok']} empty={s['empty']} error={s['error']} "
                f"range={s['first_curve']}..{s['last_curve']}")
+
+
+@app.command("fetch-realkredit")
+def fetch_realkredit() -> None:
+    """Fetch the realkredit fixed-yield history from Danmarks Statistik (MPK3) into the DB."""
+    points = dst.realkredit_fixed_yield()
+    db = CurveDB()
+    n = db.put_rate_series(dst.RK_FIXED_SERIES, dst.RK_FIXED_SOURCE, points)
+    first, last = points[0], points[-1]
+    db.close()
+    typer.echo(f"stored {n} monthly points for '{dst.RK_FIXED_SERIES}' "
+               f"({first[0]}={first[1]}% .. {last[0]}={last[1]}%)")
 
 
 @app.command("db-status")
