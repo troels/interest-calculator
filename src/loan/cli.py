@@ -12,12 +12,18 @@ from pathlib import Path
 import typer
 
 from .config import load_env
+from .charts import plot_strategy_costs
+from .compare import compare_now
+from .curves import CurveModel
 from .data.cache import Cache
 from .data import dfbf
 from .data import dst
 from .data.backfill import backfill_curves
 from .data.db import CurveDB
 from .data.loaders import parse_curve_txt, parse_dmy
+from .engine import curve_model_on, rk_fixed_yield_on
+from .models import RealkreditLoan, SwapContract
+from .valuation.swap import value_swap
 
 load_env()  # pull DFBF_COOKIE etc. from an untracked .env, if present
 
@@ -115,6 +121,80 @@ def db_status() -> None:
     typer.echo(f"empty days:    {s['empty']}")
     typer.echo(f"errors:        {s['error']}")
     typer.echo(f"curve range:   {s['first_curve']} .. {s['last_curve']}")
+
+
+def _load_curve_model(db: CurveDB, as_of: date, curve_txt: Path | None):
+    """Resolve a CurveModel: explicit txt file wins, else nearest DB curve."""
+    if curve_txt is not None:
+        return CurveModel(parse_curve_txt(curve_txt)), as_of
+    got = curve_model_on(db, as_of)
+    if got is None:
+        raise typer.BadParameter(
+            f"no swap curve at/before {as_of} in DB — run fetch-curve/backfill-curves "
+            "or pass --curve <file>")
+    return got
+
+
+@app.command("value-swap")
+def value_swap_cmd(
+    as_of: str = typer.Option(None, "--as-of", help="Valuation date (default: today)"),
+    curve: Path = typer.Option(None, "--curve", help="Use a curve txt file instead of the DB"),
+    notional: float = typer.Option(22_500_000, "--notional"),
+    fixed_rate: float = typer.Option(5.4, "--fixed-rate", help="Swap fixed rate %"),
+) -> None:
+    """Value the pay-fixed swap: mark-to-market and breakage cost."""
+    d = _parse_cli_date(as_of) if as_of else date.today()
+    db = CurveDB()
+    model, cdate = _load_curve_model(db, d, curve)
+    db.close()
+    swap = SwapContract(notional=notional, fixed_rate_pct=fixed_rate)
+    v = value_swap(model, swap, d)
+    typer.echo(f"as-of {d} (curve {cdate}):  remaining {v.remaining_years:.2f}y")
+    typer.echo(f"  market swap rate (12y): {v.market_rate_pct:.3f}%   contract: {fixed_rate:.3f}%")
+    typer.echo(f"  swap MtM:   {v.mtm:>14,.0f} DKK")
+    typer.echo(f"  breakage:   {v.breakage:>14,.0f} DKK  (cost to exit now)")
+
+
+@app.command("compare")
+def compare_cmd(
+    as_of: str = typer.Option(None, "--as-of", help="Decision date (default: today)"),
+    curve: Path = typer.Option(None, "--curve", help="Use a curve txt file instead of the DB"),
+    rk_yield: float = typer.Option(None, "--rk-yield", help="Realkredit yield %% (default: DST DB)"),
+    bidrag: float = typer.Option(0.6, "--bidrag", help="Bidragssats %%"),
+    bank_margin: float = typer.Option(0.5, "--bank-margin", help="Bank margin on the swapped loan %%"),
+    flex_tenor: float = typer.Option(5.0, "--flex-tenor", help="Flex reset tenor (years)"),
+    out: Path = typer.Option(None, "--out", help="Write a cost chart to this PNG"),
+) -> None:
+    """Compare staying in the swap vs converting to realkredit (fixed + flex)."""
+    d = _parse_cli_date(as_of) if as_of else date.today()
+    db = CurveDB()
+    model, cdate = _load_curve_model(db, d, curve)
+    y = rk_yield if rk_yield is not None else rk_fixed_yield_on(db, d)
+    db.close()
+    if y is None:
+        raise typer.BadParameter("no realkredit yield for that date — run fetch-realkredit or pass --rk-yield")
+
+    swap = SwapContract()
+    sv = value_swap(model, swap, d)
+    res = compare_now(
+        d, swap, sv, model, y, bank_margin_pct=bank_margin,
+        fixed_loan=RealkreditLoan(notional=swap.notional, bidrag_pct=bidrag),
+        flex_loan=RealkreditLoan(notional=swap.notional, product="flex",
+                                 bidrag_pct=bidrag, flex_tenor_years=flex_tenor),
+    )
+    typer.echo(f"decision date {d} (curve {cdate})   horizon {res['horizon_years']:.2f}y   "
+               f"RK yield {y:.2f}%")
+    typer.echo(f"swap breakage to exit: {res['breakage']:,.0f} DKK\n")
+    typer.echo(f"{'strategy':<16}{'rate%':>8}{'breakage':>14}{'PV interest':>16}{'TOTAL PV':>16}")
+    for s in res["strategies"]:
+        mark = "  <- best" if s["name"] == res["best"] else ""
+        typer.echo(f"{s['name']:<16}{s['rate_pct']:>8.2f}{s['breakage']:>14,.0f}"
+                   f"{s['interest_pv']:>16,.0f}{s['total_pv']:>16,.0f}{mark}")
+    typer.echo(f"\nbreak-even realkredit yield (convert ties stay): "
+               f"{res['break_even_yield_pct']:.2f}%  (today: {y:.2f}%)")
+    if out:
+        path = plot_strategy_costs(res, out)
+        typer.echo(f"chart written to {path}")
 
 
 @app.command("show-curve")

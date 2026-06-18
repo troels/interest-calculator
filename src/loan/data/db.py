@@ -137,6 +137,20 @@ class CurveDB:
         points = tuple(CurvePoint(tenor_years=r["tenor"], rate_pct=r["rate"]) for r in rows)
         return Curve(curve_date=d, points=points, source="dfbf", market="SWAP")
 
+    def nearest_curve_date(self, d: _date, max_lookback_days: int = 14) -> _date | None:
+        """Latest curve date at or before ``d`` (within ``max_lookback_days``)."""
+        cur = self.conn.execute(
+            "SELECT MAX(curve_date) FROM curve_points WHERE curve_date <= ?",
+            (d.isoformat(),),
+        )
+        row = cur.fetchone()
+        if not row or not row[0]:
+            return None
+        found = _date.fromisoformat(row[0])
+        if (d - found).days > max_lookback_days:
+            return None
+        return found
+
     def curve_dates(self) -> list[date]:
         """All dates that have curve points (status ok), ascending."""
         cur = self.conn.execute(
