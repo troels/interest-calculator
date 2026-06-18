@@ -12,7 +12,8 @@ from pathlib import Path
 import typer
 
 from .config import load_env
-from .charts import plot_strategy_costs
+from .backtest import run_backtest
+from .charts import plot_strategy_costs, plot_backtest
 from .compare import compare_now
 from .curves import CurveModel
 from .data.cache import Cache
@@ -21,8 +22,8 @@ from .data import dst
 from .data.backfill import backfill_curves
 from .data.db import CurveDB
 from .data.loaders import parse_curve_txt, parse_dmy
-from .engine import curve_model_on, rk_fixed_yield_on
-from .models import RealkreditLoan, SwapContract
+from .engine import curve_model_on, rk_fixed_rate_on, rk_flex_rate_on
+from .models import SwapContract
 from .valuation.swap import value_swap
 
 load_env()  # pull DFBF_COOKIE etc. from an untracked .env, if present
@@ -100,15 +101,23 @@ def backfill_curves_cmd(
 
 
 @app.command("fetch-realkredit")
-def fetch_realkredit() -> None:
-    """Fetch the realkredit fixed-yield history from Danmarks Statistik (MPK3) into the DB."""
-    points = dst.realkredit_fixed_yield()
+def fetch_realkredit(
+    sector: str = typer.Option(dst.DEFAULT_SECTOR, "--sector",
+                               help="DST INDSEK (1100=corp, 1400=households)"),
+    loansize: str = typer.Option(dst.DEFAULT_LOANSIZE, "--loansize",
+                                 help="DST LAANSTR (S75M=>7.5M, ALLE=all)"),
+) -> None:
+    """Fetch all-in effective realkredit rates (fixed + flex) from DST DNRNURI into the DB."""
     db = CurveDB()
-    n = db.put_rate_series(dst.RK_FIXED_SERIES, dst.RK_FIXED_SOURCE, points)
-    first, last = points[0], points[-1]
+    for series, fetch, rentfix in (
+        (dst.RK_FIXED_SERIES, dst.realkredit_fixed_rate, dst.RENTFIX_FIXED),
+        (dst.RK_FLEX_SERIES, dst.realkredit_flex_rate, dst.RENTFIX_FLEX),
+    ):
+        points = fetch(sector=sector, loansize=loansize)
+        n = db.put_rate_series(series, dst.source_tag(rentfix, sector, loansize), points)
+        typer.echo(f"stored {n} months for '{series}' "
+                   f"({points[0][0]}={points[0][1]}% .. {points[-1][0]}={points[-1][1]}%)")
     db.close()
-    typer.echo(f"stored {n} monthly points for '{dst.RK_FIXED_SERIES}' "
-               f"({first[0]}={first[1]}% .. {last[0]}={last[1]}%)")
 
 
 @app.command("db-status")
@@ -159,42 +168,72 @@ def value_swap_cmd(
 def compare_cmd(
     as_of: str = typer.Option(None, "--as-of", help="Decision date (default: today)"),
     curve: Path = typer.Option(None, "--curve", help="Use a curve txt file instead of the DB"),
-    rk_yield: float = typer.Option(None, "--rk-yield", help="Realkredit yield %% (default: DST DB)"),
-    bidrag: float = typer.Option(0.6, "--bidrag", help="Bidragssats %%"),
+    rk_fixed: float = typer.Option(None, "--rk-fixed", help="All-in fixed RK rate %% (default: DST DB)"),
+    rk_flex: float = typer.Option(None, "--rk-flex", help="All-in flex RK rate %% (default: DST DB)"),
     bank_margin: float = typer.Option(0.5, "--bank-margin", help="Bank margin on the swapped loan %%"),
-    flex_tenor: float = typer.Option(5.0, "--flex-tenor", help="Flex reset tenor (years)"),
     out: Path = typer.Option(None, "--out", help="Write a cost chart to this PNG"),
 ) -> None:
     """Compare staying in the swap vs converting to realkredit (fixed + flex)."""
     d = _parse_cli_date(as_of) if as_of else date.today()
     db = CurveDB()
     model, cdate = _load_curve_model(db, d, curve)
-    y = rk_yield if rk_yield is not None else rk_fixed_yield_on(db, d)
+    f = rk_fixed if rk_fixed is not None else rk_fixed_rate_on(db, d)
+    x = rk_flex if rk_flex is not None else rk_flex_rate_on(db, d)
     db.close()
-    if y is None:
-        raise typer.BadParameter("no realkredit yield for that date — run fetch-realkredit or pass --rk-yield")
+    if f is None:
+        raise typer.BadParameter("no fixed realkredit rate for that date — run fetch-realkredit or pass --rk-fixed")
 
     swap = SwapContract()
     sv = value_swap(model, swap, d)
-    res = compare_now(
-        d, swap, sv, model, y, bank_margin_pct=bank_margin,
-        fixed_loan=RealkreditLoan(notional=swap.notional, bidrag_pct=bidrag),
-        flex_loan=RealkreditLoan(notional=swap.notional, product="flex",
-                                 bidrag_pct=bidrag, flex_tenor_years=flex_tenor),
-    )
+    res = compare_now(d, swap, sv, model, f, bank_margin_pct=bank_margin, rk_flex_rate_pct=x)
     typer.echo(f"decision date {d} (curve {cdate})   horizon {res['horizon_years']:.2f}y   "
-               f"RK yield {y:.2f}%")
+               f"RK fixed {f:.2f}%" + (f"  flex {x:.2f}%" if x is not None else ""))
     typer.echo(f"swap breakage to exit: {res['breakage']:,.0f} DKK\n")
     typer.echo(f"{'strategy':<16}{'rate%':>8}{'breakage':>14}{'PV interest':>16}{'TOTAL PV':>16}")
     for s in res["strategies"]:
         mark = "  <- best" if s["name"] == res["best"] else ""
         typer.echo(f"{s['name']:<16}{s['rate_pct']:>8.2f}{s['breakage']:>14,.0f}"
                    f"{s['interest_pv']:>16,.0f}{s['total_pv']:>16,.0f}{mark}")
-    typer.echo(f"\nbreak-even realkredit yield (convert ties stay): "
-               f"{res['break_even_yield_pct']:.2f}%  (today: {y:.2f}%)")
+    typer.echo(f"\nbreak-even fixed realkredit rate (convert ties stay): "
+               f"{res['break_even_rate_pct']:.2f}%  (today: {f:.2f}%)")
     if out:
         path = plot_strategy_costs(res, out)
         typer.echo(f"chart written to {path}")
+
+
+@app.command("backtest")
+def backtest_cmd(
+    start: str = typer.Option("2020-01-01", "--from", help="Backtest start (YYYY-MM-DD)"),
+    end: str = typer.Option(None, "--to", help="Backtest end (default: today)"),
+    bank_margin: float = typer.Option(0.5, "--bank-margin", help="Bank margin %%"),
+    out: Path = typer.Option("output/backtest.png", "--out", help="Chart PNG path"),
+) -> None:
+    """Replay history: when would converting to realkredit have been optimal?"""
+    start_d = _parse_cli_date(start)
+    end_d = _parse_cli_date(end) if end else date.today()
+    db = CurveDB()
+    res = run_backtest(db, start=start_d, end=end_d, bank_margin_pct=bank_margin)
+    db.close()
+    typer.echo(f"backtest {res['start']}..{res['end']}: {res['months']} months, {res['gaps']} gaps")
+    if not res["rows"]:
+        raise typer.Exit(1)
+    b = res["best_month"]
+    typer.echo(f"\noptimal conversion month: {b['as_of']}  "
+               f"advantage {b['convert_advantage_pv']:,.0f} DKK PV")
+    typer.echo(f"  (breakage {b['breakage']:,.0f}, RK fixed {b['rk_fixed_pct']:.2f}%, "
+               f"swap mkt {b['market_rate_pct']:.2f}%)")
+    # show a yearly sample
+    typer.echo(f"\n{'month':<12}{'breakage':>14}{'RKfixed':>9}{'convert adv PV':>18}{'best':>16}")
+    seen = set()
+    for r in res["rows"]:
+        yr = r["as_of"][:4]
+        if yr in seen:
+            continue
+        seen.add(yr)
+        typer.echo(f"{r['as_of']:<12}{r['breakage']:>14,.0f}{r['rk_fixed_pct']:>9.2f}"
+                   f"{r['convert_advantage_pv']:>18,.0f}{r['best']:>16}")
+    path = plot_backtest(res["rows"], out)
+    typer.echo(f"\nchart written to {path}")
 
 
 @app.command("show-curve")

@@ -1,16 +1,22 @@
-"""Client for the Danmarks Statistik (statbank) public API.
+"""Client for Danmarks Statistik (statbank) — realkredit effective lending rates.
 
-No auth, no rate-limit concerns: one request returns an entire series, so unlike
-dfbf there is no gentle backfill — we fetch the whole history in a single call.
+Source table **DNRNURI** "New domestic mortgage loans from mortgage banks"
+(Nationalbanken's MFI interest-rate statistics, published via DST). No auth; the
+whole monthly history (from 2003) comes in one request per series.
 
-We use table **MPK3** ("Interest rates, by type"), series ``5500701001`` =
-"Unit mortgage bonds (redemption yield)" — the realkredit bond redemption yield,
-monthly back to 1985. This is the fixed-realkredit rate proxy for the cost model
-(the flex/short rate is taken from the dfbf swap-curve short end instead).
+We read ``AL51EFFR`` = "Annualised agreed rate incl. administration rate" — the
+all-in effective realkredit rate the borrower actually pays (**bidrag already
+included**), split by original interest-rate fixation:
 
-Caveats (documented, not hidden):
-  * it is a *blended* realkredit bond yield, not split by maturity/coupon;
-  * monthly ultimo values; missing months come back as ``..`` and are skipped.
+  * fixed 30Y  -> ``RENTFIX = S10A`` (rate fixed over 10 years)
+  * flex/short -> ``RENTFIX = M1A``  (rate fixed up to 1 year)
+
+Defaults target this borrower's profile: a large corporate loan
+(``INDSEK=1100`` non-financial corporations, ``LAANSTR=S75M`` over 7.5M DKK),
+since a 22.5M bullet swap is a commercial facility. All are configurable.
+
+Replaces the earlier MPK3 series, which used a niche bond category and gave an
+incorrect (too low) rate.
 """
 
 from __future__ import annotations
@@ -20,12 +26,20 @@ import io
 
 DATA_URL = "https://api.statbank.dk/v1/data/{table}/CSV"
 
-MPK3_TABLE = "MPK3"
-MPK3_RK_FIXED_YIELD = "5500701001"   # Unit mortgage bonds (redemption yield)
+TABLE = "DNRNURI"
+EFF_RATE = "AL51EFFR"          # effective rate incl. bidrag (all-in)
+BIDRAG = "AL51BIDS"            # administration rate (bidrag) alone
 
-# Logical series name + provenance used when storing in rate_series.
-RK_FIXED_SERIES = "rk_fixed_yield"
-RK_FIXED_SOURCE = f"dst:{MPK3_TABLE}:{MPK3_RK_FIXED_YIELD}"
+RENTFIX_FIXED = "S10A"         # > 10 years  -> 30Y fixed
+RENTFIX_FLEX = "M1A"          # <= 1 year   -> flex/short
+
+DEFAULT_SECTOR = "1100"        # non-financial corporations
+DEFAULT_LOANSIZE = "S75M"      # loans over 7.5M DKK
+CURRENCY = "DKK"
+
+# Logical series names stored in rate_series.
+RK_FIXED_SERIES = "rk_fixed_eff"
+RK_FLEX_SERIES = "rk_flex_eff"
 
 
 class DstError(RuntimeError):
@@ -33,7 +47,6 @@ class DstError(RuntimeError):
 
 
 def _parse_period(tid: str) -> str:
-    """'2026M05' -> '2026-05'."""
     tid = tid.strip()
     if "M" in tid:
         y, m = tid.split("M")
@@ -42,18 +55,16 @@ def _parse_period(tid: str) -> str:
 
 
 def _parse_value(raw: str) -> float | None:
-    """Danish decimal comma; '..' / '' mean missing."""
     raw = raw.strip()
     if not raw or raw == "..":
         return None
     return float(raw.replace(".", "").replace(",", ".")) if "," in raw else float(raw)
 
 
-def parse_mpk3_csv(text: str) -> list[tuple[str, float]]:
-    """Parse a semicolon MPK3 CSV (TYPE;TID;INDHOLD) into (period, value) points."""
+def parse_series_csv(text: str) -> list[tuple[str, float]]:
+    """Parse a single-series DNRNURI CSV (…;TID;INDHOLD) into (period, value)."""
     text = text.lstrip("﻿")
-    reader = csv.reader(io.StringIO(text), delimiter=";")
-    rows = list(reader)
+    rows = list(csv.reader(io.StringIO(text), delimiter=";"))
     if not rows:
         raise DstError("empty DST response")
     header = [h.strip().upper() for h in rows[0]]
@@ -61,38 +72,52 @@ def parse_mpk3_csv(text: str) -> list[tuple[str, float]]:
         i_tid, i_val = header.index("TID"), header.index("INDHOLD")
     except ValueError as exc:
         raise DstError(f"unexpected DST header: {rows[0]}") from exc
-
-    points: list[tuple[str, float]] = []
+    out: list[tuple[str, float]] = []
     for row in rows[1:]:
         if len(row) <= max(i_tid, i_val):
             continue
-        value = _parse_value(row[i_val])
-        if value is None:
+        v = _parse_value(row[i_val])
+        if v is None:
             continue
-        points.append((_parse_period(row[i_tid]), value))
-    return points
+        out.append((_parse_period(row[i_tid]), v))
+    return out
 
 
-def fetch_mpk3_series(type_code: str = MPK3_RK_FIXED_YIELD, *, timeout: float = 30.0) -> str:
-    """Fetch the raw CSV for one MPK3 type across all available months."""
+def fetch_series(rentfix: str, *, data: str = EFF_RATE, sector: str = DEFAULT_SECTOR,
+                 loansize: str = DEFAULT_LOANSIZE, timeout: float = 30.0) -> list[tuple[str, float]]:
+    """Fetch one DNRNURI series (single data type + rate-fixation) across all months."""
     import httpx
 
-    params = {
-        "valuePresentation": "Value",
+    body = {
+        "table": TABLE, "format": "CSV", "valuePresentation": "Value",
         "delimiter": "Semicolon",
-        "TYPE": type_code,
-        "Tid": "*",
+        "variables": [
+            {"code": "DATA", "values": [data]},
+            {"code": "INDSEK", "values": [sector]},
+            {"code": "VALUTA", "values": [CURRENCY]},
+            {"code": "LØBETID1", "values": ["ALLE"]},
+            {"code": "RENTFIX", "values": [rentfix]},
+            {"code": "LAANSTR", "values": [loansize]},
+            {"code": "Tid", "values": ["*"]},
+        ],
     }
-    resp = httpx.get(DATA_URL.format(table=MPK3_TABLE), params=params,
-                     headers={"accept": "text/csv"}, timeout=timeout)
+    resp = httpx.post(DATA_URL.format(table=TABLE), json=body, timeout=timeout)
     resp.raise_for_status()
-    return resp.text
-
-
-def realkredit_fixed_yield(*, timeout: float = 30.0) -> list[tuple[str, float]]:
-    """Full monthly realkredit fixed-yield history as (period 'YYYY-MM', percent)."""
-    raw = fetch_mpk3_series(MPK3_RK_FIXED_YIELD, timeout=timeout)
-    points = parse_mpk3_csv(raw)
+    points = parse_series_csv(resp.text)
     if not points:
-        raise DstError("no realkredit yield points parsed from MPK3")
+        raise DstError(f"no points parsed for RENTFIX={rentfix}")
     return points
+
+
+def realkredit_fixed_rate(**kw) -> list[tuple[str, float]]:
+    """All-in effective 30Y-fixed realkredit rate history (incl. bidrag)."""
+    return fetch_series(RENTFIX_FIXED, **kw)
+
+
+def realkredit_flex_rate(**kw) -> list[tuple[str, float]]:
+    """All-in effective flex/short realkredit rate history (incl. bidrag)."""
+    return fetch_series(RENTFIX_FLEX, **kw)
+
+
+def source_tag(rentfix: str, sector: str = DEFAULT_SECTOR, loansize: str = DEFAULT_LOANSIZE) -> str:
+    return f"dst:{TABLE}:{EFF_RATE}:{rentfix}:{sector}:{loansize}"

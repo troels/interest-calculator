@@ -31,7 +31,7 @@ def plot_strategy_costs(result: dict, out_path: str | Path) -> Path:
     ax.set_ylabel("Total cost (DKK million, PV)")
     ax.set_title(f"Swap vs realkredit — total remaining cost as of {result['as_of']}\n"
                  f"breakage={result['breakage']/1e6:.2f}M  "
-                 f"break-even RK yield={result['break_even_yield_pct']:.2f}%")
+                 f"break-even RK rate={result['break_even_rate_pct']:.2f}%")
     ax.legend()
     fig.tight_layout()
     out = _ensure_parent(out_path)

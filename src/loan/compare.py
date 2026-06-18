@@ -20,9 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .curves import CurveModel
-from .models import RealkreditLoan, SwapContract
+from .models import SwapContract
 from .valuation.swap import SwapValuation, fixed_leg_schedule
-from .valuation import realkredit as rk
 
 
 @dataclass(frozen=True)
@@ -64,40 +63,40 @@ def compare_now(
     swap: SwapContract,
     swap_val: SwapValuation,
     model: CurveModel,
-    rk_fixed_yield_pct: float,
+    rk_fixed_rate_pct: float,
     *,
     bank_margin_pct: float = 0.5,
-    fixed_loan: RealkreditLoan | None = None,
-    flex_loan: RealkreditLoan | None = None,
+    rk_flex_rate_pct: float | None = None,
+    notional: float | None = None,
 ) -> dict:
-    """Compare strategies as of ``as_of``. Returns strategies + break-even + best."""
-    fixed_loan = fixed_loan or RealkreditLoan(notional=swap.notional, product="fixed_callable")
+    """Compare strategies as of ``as_of``. Returns strategies + break-even + best.
+
+    ``rk_fixed_rate_pct`` / ``rk_flex_rate_pct`` are **all-in** effective realkredit
+    rates (bidrag already included), e.g. from DST DNRNURI.
+    """
+    N = notional if notional is not None else swap.notional
     horizon = swap.remaining_years(as_of)
 
     # Stay: swap fixed + bank margin, no breakage.
     stay_rate = swap.fixed_rate_pct + bank_margin_pct
-    stay_nom, stay_pv = remaining_interest(swap.notional, stay_rate, model, horizon)
+    stay_nom, stay_pv = remaining_interest(N, stay_rate, model, horizon)
     strategies = [StrategyCost("stay_swap", 0.0, stay_rate, stay_nom, stay_pv)]
 
-    # Convert to fixed realkredit.
+    # Convert to fixed realkredit (rate already all-in).
     bk = swap_val.breakage
-    f_rate = rk.fixed_rate_pct(fixed_loan, rk_fixed_yield_pct)
-    f_nom, f_pv = remaining_interest(fixed_loan.notional, f_rate, model, horizon)
-    strategies.append(StrategyCost("convert_fixed", bk, f_rate, f_nom, f_pv))
+    f_nom, f_pv = remaining_interest(N, rk_fixed_rate_pct, model, horizon)
+    strategies.append(StrategyCost("convert_fixed", bk, rk_fixed_rate_pct, f_nom, f_pv))
 
-    # Convert to flex realkredit (rate held flat at today's short end).
-    if flex_loan is not None:
-        x_rate = rk.flex_rate_pct(flex_loan, model)
-        x_nom, x_pv = remaining_interest(flex_loan.notional, x_rate, model, horizon)
-        strategies.append(StrategyCost("convert_flex", bk, x_rate, x_nom, x_pv))
+    # Convert to flex realkredit (rate held flat at today's level for this view).
+    if rk_flex_rate_pct is not None:
+        x_nom, x_pv = remaining_interest(N, rk_flex_rate_pct, model, horizon)
+        strategies.append(StrategyCost("convert_flex", bk, rk_flex_rate_pct, x_nom, x_pv))
 
     # Break-even fixed realkredit rate: where convert_fixed total ties stay total.
     # PV basis: bk + N*x/100*annuity_pv = stay_pv  =>  x = (stay_pv - bk)*100 / (N*annuity_pv)
     offsets, taus = fixed_leg_schedule(horizon)
     annuity_pv = sum(tau * model.discount_factor(o) for tau, o in zip(taus, offsets))
-    break_even_pv = (stay_pv - bk) * 100.0 / (fixed_loan.notional * annuity_pv) if annuity_pv else 0.0
-    # the bidrag-inclusive break-even bond yield (subtract bidrag to compare to DST yield)
-    break_even_yield = break_even_pv - fixed_loan.bidrag_pct
+    break_even_pv = (stay_pv - bk) * 100.0 / (N * annuity_pv) if annuity_pv else 0.0
 
     best = min(strategies, key=lambda s: s.total_pv)
     return {
@@ -105,8 +104,7 @@ def compare_now(
         "horizon_years": horizon,
         "breakage": bk,
         "strategies": [s.to_dict() for s in strategies],
-        "break_even_all_in_pct": break_even_pv,
-        "break_even_yield_pct": break_even_yield,
-        "current_rk_all_in_pct": f_rate,
+        "break_even_rate_pct": break_even_pv,
+        "current_rk_fixed_pct": rk_fixed_rate_pct,
         "best": best.name,
     }

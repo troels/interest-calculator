@@ -9,7 +9,7 @@ import pytest
 from loan.compare import compare_now, remaining_interest, StrategyCost
 from loan.curves import CurveModel
 from loan.data.loaders import parse_curve_txt
-from loan.models import RealkreditLoan, SwapContract
+from loan.models import SwapContract
 from loan.valuation.swap import value_swap
 
 
@@ -37,10 +37,7 @@ def test_compare_now_structure_and_breakage(model):
     swap = SwapContract()
     as_of = date(2026, 6, 15)
     sv = value_swap(model, swap, as_of)
-    res = compare_now(as_of, swap, sv, model, rk_fixed_yield_pct=3.0,
-                      bank_margin_pct=0.5,
-                      fixed_loan=RealkreditLoan(notional=swap.notional, bidrag_pct=0.6),
-                      flex_loan=RealkreditLoan(notional=swap.notional, product="flex"))
+    res = compare_now(as_of, swap, sv, model, 4.5, bank_margin_pct=0.5, rk_flex_rate_pct=3.2)
     names = [s["name"] for s in res["strategies"]]
     assert names == ["stay_swap", "convert_fixed", "convert_flex"]
     assert res["breakage"] == pytest.approx(sv.breakage)
@@ -56,9 +53,8 @@ def test_break_even_yield_is_consistent(model):
     swap = SwapContract()
     as_of = date(2026, 6, 15)
     sv = value_swap(model, swap, as_of)
-    res = compare_now(as_of, swap, sv, model, rk_fixed_yield_pct=3.0, bank_margin_pct=0.5,
-                      fixed_loan=RealkreditLoan(notional=swap.notional, bidrag_pct=0.6))
-    be_all_in = res["break_even_all_in_pct"]
+    res = compare_now(as_of, swap, sv, model, 4.5, bank_margin_pct=0.5)
+    be_all_in = res["break_even_rate_pct"]
     # re-price convert at the break-even all-in rate
     _, pv = remaining_interest(swap.notional, be_all_in, model, sv.remaining_years)
     stay_pv = next(s["interest_pv"] for s in res["strategies"] if s["name"] == "stay_swap")
@@ -70,7 +66,6 @@ def test_staying_beats_converting_when_breakage_huge(model):
     swap = SwapContract()
     as_of = date(2026, 6, 15)
     sv = value_swap(model, swap, as_of)
-    res = compare_now(as_of, swap, sv, model, rk_fixed_yield_pct=3.0, bank_margin_pct=0.5,
-                      fixed_loan=RealkreditLoan(notional=swap.notional, bidrag_pct=0.6))
+    res = compare_now(as_of, swap, sv, model, 4.5, bank_margin_pct=0.5)
     # sanity: best is a real strategy name
     assert res["best"] in {"stay_swap", "convert_fixed"}

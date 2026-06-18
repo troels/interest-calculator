@@ -9,7 +9,7 @@ import pytest
 from loan.curves import CurveModel
 from loan.data.db import CurveDB
 from loan.data.loaders import parse_curve_txt
-from loan.engine import curve_model_on, rk_fixed_yield_on
+from loan.engine import curve_model_on, rk_fixed_rate_on
 
 
 def _seed_curve(db, d, txt):
@@ -41,17 +41,18 @@ def test_curve_model_on_too_far_returns_none(tmp_path, sample_curve_txt):
     assert curve_model_on(db, date(2026, 8, 1)) is None  # beyond lookback
 
 
-def test_rk_fixed_yield_on(tmp_path):
+def test_rk_fixed_rate_on(tmp_path):
+    from loan.data.dst import RK_FIXED_SERIES
     db = CurveDB(tmp_path / "t.db")
-    db.put_rate_series("rk_fixed_yield", "src", [("2026-05", 3.0)])
-    assert rk_fixed_yield_on(db, date(2026, 5, 20)) == 3.0
-    assert rk_fixed_yield_on(db, date(2026, 6, 1)) == 3.0  # carries forward
+    db.put_rate_series(RK_FIXED_SERIES, "src", [("2026-05", 4.49)])
+    assert rk_fixed_rate_on(db, date(2026, 5, 20)) == 4.49
+    assert rk_fixed_rate_on(db, date(2026, 6, 1)) == 4.49  # carries forward
 
 
 def test_plot_strategy_costs_writes_png(tmp_path):
     from loan.charts import plot_strategy_costs
     result = {
-        "as_of": "2026-06-15", "breakage": 4_746_568, "break_even_yield_pct": 3.17,
+        "as_of": "2026-06-15", "breakage": 4_746_568, "break_even_rate_pct": 3.17,
         "strategies": [
             {"name": "stay_swap", "breakage": 0, "interest_pv": 13_127_432, "total_pv": 13_127_432},
             {"name": "convert_fixed", "breakage": 4_746_568, "interest_pv": 8_009_959, "total_pv": 12_756_527},

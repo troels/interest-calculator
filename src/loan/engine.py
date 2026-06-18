@@ -10,7 +10,7 @@ from datetime import date
 
 from .curves import CurveModel
 from .data.db import CurveDB
-from .data.dst import RK_FIXED_SERIES
+from .data.dst import RK_FIXED_SERIES, RK_FLEX_SERIES
 
 
 def curve_model_on(db: CurveDB, d: date, *, max_lookback_days: int = 14
@@ -25,6 +25,11 @@ def curve_model_on(db: CurveDB, d: date, *, max_lookback_days: int = 14
     return CurveModel(curve), found
 
 
-def rk_fixed_yield_on(db: CurveDB, d: date) -> float | None:
-    """Realkredit fixed bond yield (percent) for the month of ``d``."""
+def rk_fixed_rate_on(db: CurveDB, d: date) -> float | None:
+    """All-in effective fixed (30Y) realkredit rate (percent, incl. bidrag) for month of ``d``."""
     return db.rate_on(RK_FIXED_SERIES, d)
+
+
+def rk_flex_rate_on(db: CurveDB, d: date) -> float | None:
+    """All-in effective flex/short realkredit rate (percent, incl. bidrag) for month of ``d``."""
+    return db.rate_on(RK_FLEX_SERIES, d)
