@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Secrets — dfbf session cookies live here, never commit
+.env
+config.local
+
+# Cached fetched data (keep the directory, ignore contents except samples)
+data/cache/**
+!data/cache/dfbf/.gitkeep
+!data/cache/realkredit/.gitkeep
+
+# SQLite store of fetched curves
+data/*.db
+data/*.db-journal
+
+# Generated outputs
+output/*
+!output/.gitkeep
+
+# Logs
+*.log
