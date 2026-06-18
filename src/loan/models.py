@@ -51,6 +51,35 @@ class Curve:
 
 
 @dataclass(frozen=True)
+class RealkreditQuote:
+    """A single dated quote for one realkredit bond (kurs/coupon/yield).
+
+    Source-agnostic: whether the price comes from Nasdaq, an issuer kursliste,
+    or a provided file, it normalises to this shape. ``product`` distinguishes a
+    fixed callable bond (``fixed_callable``) from a short/flex refinancing bond
+    (``flex``). Fields are optional because different sources expose different
+    subsets (e.g. some give price but not yield).
+    """
+
+    quote_date: date
+    isin: str
+    name: str | None = None
+    issuer: str | None = None            # e.g. RD, NYK, TOT, NDA
+    product: str | None = None           # fixed_callable | flex | unknown
+    coupon_pct: float | None = None
+    maturity: date | None = None
+    price: float | None = None           # kurs (clean price)
+    yield_pct: float | None = None
+    source: str = "nasdaq"
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["quote_date"] = self.quote_date.isoformat()
+        d["maturity"] = self.maturity.isoformat() if self.maturity else None
+        return d
+
+
+@dataclass(frozen=True)
 class SwapContract:
     """The user's pay-fixed interest rate swap.
 

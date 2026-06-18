@@ -17,7 +17,9 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
-from ..models import Curve, CurvePoint
+from datetime import date as _date
+
+from ..models import Curve, CurvePoint, RealkreditQuote
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[3] / "data" / "loan.db"
 
@@ -35,6 +37,26 @@ CREATE TABLE IF NOT EXISTS fetch_log (
     status     TEXT NOT NULL,          -- ok | empty | error
     n_points   INTEGER NOT NULL DEFAULT 0,
     raw_json   TEXT,
+    fetched_at TEXT
+);
+CREATE TABLE IF NOT EXISTS realkredit_quotes (
+    quote_date TEXT NOT NULL,
+    isin       TEXT NOT NULL,
+    name       TEXT,
+    issuer     TEXT,
+    product    TEXT,                   -- fixed_callable | flex | unknown
+    coupon     REAL,
+    maturity   TEXT,
+    price      REAL,                   -- kurs
+    yield_pct  REAL,
+    source     TEXT NOT NULL DEFAULT 'nasdaq',
+    PRIMARY KEY (quote_date, isin)
+);
+CREATE TABLE IF NOT EXISTS realkredit_fetch_log (
+    fetch_key  TEXT PRIMARY KEY,       -- date or instrument id, per source access pattern
+    status     TEXT NOT NULL,          -- ok | empty | error
+    n_rows     INTEGER NOT NULL DEFAULT 0,
+    raw        TEXT,
     fetched_at TEXT
 );
 """
@@ -113,6 +135,62 @@ class CurveDB:
             "SELECT DISTINCT curve_date FROM curve_points ORDER BY curve_date"
         )
         return [date.fromisoformat(row[0]) for row in cur.fetchall()]
+
+    # ----------------------------------------------------------- realkredit
+    def rk_attempted(self, key: str) -> bool:
+        cur = self.conn.execute(
+            "SELECT 1 FROM realkredit_fetch_log WHERE fetch_key = ?", (key,)
+        )
+        return cur.fetchone() is not None
+
+    def rk_record(
+        self,
+        key: str,
+        status: str,
+        *,
+        quotes: list[RealkreditQuote] | None = None,
+        raw: str | None = None,
+        fetched_at: str | None = None,
+    ) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO realkredit_fetch_log "
+                "(fetch_key, status, n_rows, raw, fetched_at) VALUES (?, ?, ?, ?, ?)",
+                (key, status, len(quotes or []), raw, fetched_at),
+            )
+            if quotes:
+                self.conn.executemany(
+                    "INSERT OR REPLACE INTO realkredit_quotes "
+                    "(quote_date, isin, name, issuer, product, coupon, maturity, "
+                    " price, yield_pct, source) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (q.quote_date.isoformat(), q.isin, q.name, q.issuer, q.product,
+                         q.coupon_pct, q.maturity.isoformat() if q.maturity else None,
+                         q.price, q.yield_pct, q.source)
+                        for q in quotes
+                    ],
+                )
+
+    def rk_quotes_on(self, d: _date, product: str | None = None) -> list[RealkreditQuote]:
+        sql = "SELECT * FROM realkredit_quotes WHERE quote_date = ?"
+        params: list = [d.isoformat()]
+        if product:
+            sql += " AND product = ?"
+            params.append(product)
+        sql += " ORDER BY coupon"
+        rows = self.conn.execute(sql, params).fetchall()
+        return [self._row_to_quote(r) for r in rows]
+
+    @staticmethod
+    def _row_to_quote(r: sqlite3.Row) -> RealkreditQuote:
+        return RealkreditQuote(
+            quote_date=_date.fromisoformat(r["quote_date"]),
+            isin=r["isin"], name=r["name"], issuer=r["issuer"], product=r["product"],
+            coupon_pct=r["coupon"],
+            maturity=_date.fromisoformat(r["maturity"]) if r["maturity"] else None,
+            price=r["price"], yield_pct=r["yield_pct"], source=r["source"],
+        )
 
     def stats(self) -> dict:
         ok = self.conn.execute(
