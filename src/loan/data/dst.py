@@ -11,9 +11,11 @@ included**), split by original interest-rate fixation:
   * fixed 30Y  -> ``RENTFIX = S10A`` (rate fixed over 10 years)
   * flex/short -> ``RENTFIX = M1A``  (rate fixed up to 1 year)
 
-Defaults target this borrower's profile: a large corporate loan
-(``INDSEK=1100`` non-financial corporations, ``LAANSTR=S75M`` over 7.5M DKK),
-since a 22.5M bullet swap is a commercial facility. All are configurable.
+Defaults target this borrower's profile: an **andelsboligforening** (housing
+co-op), which is a non-profit — ``INDSEK=1500`` "Non-profit institutions serving
+households", ``LAANSTR=ALLE``. The short (<=1y) bucket is confidential for this
+sector, so the flex rate uses the 1-5y bucket (``RENTFIX=1A5A``, i.e. F3/F5-type
+loans, the realistic flex choice for a co-op). All are configurable.
 
 Replaces the earlier MPK3 series, which used a niche bond category and gave an
 incorrect (too low) rate.
@@ -30,11 +32,11 @@ TABLE = "DNRNURI"
 EFF_RATE = "AL51EFFR"          # effective rate incl. bidrag (all-in)
 BIDRAG = "AL51BIDS"            # administration rate (bidrag) alone
 
-RENTFIX_FIXED = "S10A"         # > 10 years  -> 30Y fixed
-RENTFIX_FLEX = "M1A"          # <= 1 year   -> flex/short
+RENTFIX_FIXED = "S10A"         # > 10 years fixation -> long fixed (anchor ~30Y)
+RENTFIX_FLEX = "1A5A"         # 1-5 years -> F3/F5-type (the <=1y bucket is confidential for co-ops)
 
-DEFAULT_SECTOR = "1100"        # non-financial corporations
-DEFAULT_LOANSIZE = "S75M"      # loans over 7.5M DKK
+DEFAULT_SECTOR = "1500"        # non-profit institutions serving households (andelsboligforening)
+DEFAULT_LOANSIZE = "ALLE"      # all loan sizes (size split is corp-only)
 CURRENCY = "DKK"
 
 # Logical series names stored in rate_series.

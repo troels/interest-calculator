@@ -20,18 +20,20 @@ def plot_strategy_costs(result: dict, out_path: str | Path) -> Path:
     strategies = result["strategies"]
     names = [s["name"] for s in strategies]
     breakage = [s["breakage"] / 1e6 for s in strategies]
-    interest = [s["interest_pv"] / 1e6 for s in strategies]
+    debt = [(s["total_pv"] - s["breakage"]) / 1e6 for s in strategies]  # servicing + residual
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.bar(names, interest, label="PV interest", color="#3b75af")
-    ax.bar(names, breakage, bottom=interest, label="Swap breakage", color="#c0504d")
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.bar(names, debt, label="PV debt (interest+principal+residual)", color="#3b75af")
+    ax.bar(names, breakage, bottom=debt, label="Swap breakage", color="#c0504d")
     for i, s in enumerate(strategies):
-        ax.text(i, (s["interest_pv"] + s["breakage"]) / 1e6, f"{s['total_pv']/1e6:.2f}M",
+        ax.text(i, s["total_pv"] / 1e6, f"{s['total_pv']/1e6:.1f}M",
                 ha="center", va="bottom", fontsize=9)
+    amort = "amortizing" if result.get("amortize") else "interest-only"
     ax.set_ylabel("Total cost (DKK million, PV)")
-    ax.set_title(f"Swap vs realkredit — total remaining cost as of {result['as_of']}\n"
+    ax.set_title(f"Swap vs fixed realkredit — total PV cost as of {result['as_of']} ({amort})\n"
                  f"breakage={result['breakage']/1e6:.2f}M  "
-                 f"break-even RK rate={result['break_even_rate_pct']:.2f}%")
+                 f"break-even fixed rate={result['break_even_rate_pct']:.2f}%  "
+                 f"discount: {result.get('discount_basis','')}")
     ax.legend()
     fig.tight_layout()
     out = _ensure_parent(out_path)

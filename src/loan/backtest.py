@@ -41,6 +41,8 @@ def run_backtest(
     end: date,
     swap: SwapContract | None = None,
     bank_margin_pct: float = 0.5,
+    amortize: bool = False,
+    discount_rate_pct: float | None = None,
 ) -> dict:
     """Run the convert-vs-stay comparison across every month in the window."""
     swap = swap or SwapContract()
@@ -59,11 +61,11 @@ def run_backtest(
         model, cdate = got
         sv = value_swap(model, swap, d)
         res = compare_now(d, swap, sv, model, f, bank_margin_pct=bank_margin_pct,
-                          rk_flex_rate_pct=x)
+                          amortize=amortize, discount_rate_pct=discount_rate_pct, flex_rate_pct=x)
         strat = {s["name"]: s for s in res["strategies"]}
         stay_pv = strat["stay_swap"]["total_pv"]
-        conv_pv = strat["convert_fixed"]["total_pv"]
-        flex_pv = strat["convert_flex"]["total_pv"] if "convert_flex" in strat else None
+        fixed = {k: v for k, v in strat.items() if k.startswith("fixed_")}
+        best_fixed = min(fixed.values(), key=lambda s: s["total_pv"])
         rows.append({
             "as_of": d.isoformat(),
             "curve_date": cdate.isoformat(),
@@ -73,9 +75,9 @@ def run_backtest(
             "market_rate_pct": sv.market_rate_pct,
             "breakage": sv.breakage,
             "stay_total_pv": stay_pv,
-            "convert_fixed_total_pv": conv_pv,
-            "convert_flex_total_pv": flex_pv,
-            "convert_advantage_pv": stay_pv - conv_pv,   # positive => converting (fixed) wins
+            "best_fixed_name": best_fixed["name"],
+            "best_fixed_total_pv": best_fixed["total_pv"],
+            "convert_advantage_pv": stay_pv - best_fixed["total_pv"],  # positive => converting wins
             "best": res["best"],
         })
 

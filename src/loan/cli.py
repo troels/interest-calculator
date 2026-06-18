@@ -168,12 +168,16 @@ def value_swap_cmd(
 def compare_cmd(
     as_of: str = typer.Option(None, "--as-of", help="Decision date (default: today)"),
     curve: Path = typer.Option(None, "--curve", help="Use a curve txt file instead of the DB"),
-    rk_fixed: float = typer.Option(None, "--rk-fixed", help="All-in fixed RK rate %% (default: DST DB)"),
-    rk_flex: float = typer.Option(None, "--rk-flex", help="All-in flex RK rate %% (default: DST DB)"),
+    rk_fixed: float = typer.Option(None, "--rk-fixed", help="Anchor long-fixed RK rate %% (default: DST DB)"),
+    rk_flex: float = typer.Option(None, "--rk-flex", help="F5 flex RK rate %% (default: DST DB)"),
     bank_margin: float = typer.Option(0.5, "--bank-margin", help="Bank margin on the swapped loan %%"),
+    amortize: bool = typer.Option(False, "--amortize/--interest-only",
+                                  help="Amortizing (annuity) vs interest-only (afdragsfri)"),
+    discount_rate: float = typer.Option(None, "--discount-rate",
+                                        help="Flat annual discount rate %% for future money (default: swap curve)"),
     out: Path = typer.Option(None, "--out", help="Write a cost chart to this PNG"),
 ) -> None:
-    """Compare staying in the swap vs converting to realkredit (fixed + flex)."""
+    """Compare staying in the swap vs converting to 10/20/30Y fixed realkredit (+ F5)."""
     d = _parse_cli_date(as_of) if as_of else date.today()
     db = CurveDB()
     model, cdate = _load_curve_model(db, d, curve)
@@ -185,17 +189,20 @@ def compare_cmd(
 
     swap = SwapContract()
     sv = value_swap(model, swap, d)
-    res = compare_now(d, swap, sv, model, f, bank_margin_pct=bank_margin, rk_flex_rate_pct=x)
+    res = compare_now(d, swap, sv, model, f, bank_margin_pct=bank_margin, amortize=amortize,
+                      discount_rate_pct=discount_rate, flex_rate_pct=x)
     typer.echo(f"decision date {d} (curve {cdate})   horizon {res['horizon_years']:.2f}y   "
-               f"RK fixed {f:.2f}%" + (f"  flex {x:.2f}%" if x is not None else ""))
-    typer.echo(f"swap breakage to exit: {res['breakage']:,.0f} DKK\n")
+               f"anchor 30Y fixed {f:.2f}%" + (f"  F5 {x:.2f}%" if x is not None else "")
+               + f"   [{'amortizing' if amortize else 'interest-only'}]")
+    typer.echo(f"swap breakage to exit: {res['breakage']:,.0f} DKK   "
+               f"discounting: {res['discount_basis']}\n")
     typer.echo(f"{'strategy':<16}{'rate%':>8}{'breakage':>14}{'PV interest':>16}{'TOTAL PV':>16}")
     for s in res["strategies"]:
         mark = "  <- best" if s["name"] == res["best"] else ""
         typer.echo(f"{s['name']:<16}{s['rate_pct']:>8.2f}{s['breakage']:>14,.0f}"
                    f"{s['interest_pv']:>16,.0f}{s['total_pv']:>16,.0f}{mark}")
     typer.echo(f"\nbreak-even fixed realkredit rate (convert ties stay): "
-               f"{res['break_even_rate_pct']:.2f}%  (today: {f:.2f}%)")
+               f"{res['break_even_rate_pct']:.2f}%  (a fixed loan below this beats staying)")
     if out:
         path = plot_strategy_costs(res, out)
         typer.echo(f"chart written to {path}")
@@ -206,20 +213,25 @@ def backtest_cmd(
     start: str = typer.Option("2020-01-01", "--from", help="Backtest start (YYYY-MM-DD)"),
     end: str = typer.Option(None, "--to", help="Backtest end (default: today)"),
     bank_margin: float = typer.Option(0.5, "--bank-margin", help="Bank margin %%"),
+    amortize: bool = typer.Option(False, "--amortize/--interest-only",
+                                  help="Amortizing vs interest-only realkredit"),
+    discount_rate: float = typer.Option(None, "--discount-rate", help="Flat discount rate %%"),
     out: Path = typer.Option("output/backtest.png", "--out", help="Chart PNG path"),
 ) -> None:
     """Replay history: when would converting to realkredit have been optimal?"""
     start_d = _parse_cli_date(start)
     end_d = _parse_cli_date(end) if end else date.today()
     db = CurveDB()
-    res = run_backtest(db, start=start_d, end=end_d, bank_margin_pct=bank_margin)
+    res = run_backtest(db, start=start_d, end=end_d, bank_margin_pct=bank_margin,
+                       amortize=amortize, discount_rate_pct=discount_rate)
     db.close()
-    typer.echo(f"backtest {res['start']}..{res['end']}: {res['months']} months, {res['gaps']} gaps")
+    typer.echo(f"backtest {res['start']}..{res['end']}: {res['months']} months, {res['gaps']} gaps "
+               f"[{'amortizing' if amortize else 'interest-only'}]")
     if not res["rows"]:
         raise typer.Exit(1)
     b = res["best_month"]
     typer.echo(f"\noptimal conversion month: {b['as_of']}  "
-               f"advantage {b['convert_advantage_pv']:,.0f} DKK PV")
+               f"advantage {b['convert_advantage_pv']:,.0f} DKK PV (via {b['best_fixed_name']})")
     typer.echo(f"  (breakage {b['breakage']:,.0f}, RK fixed {b['rk_fixed_pct']:.2f}%, "
                f"swap mkt {b['market_rate_pct']:.2f}%)")
     # show a yearly sample
